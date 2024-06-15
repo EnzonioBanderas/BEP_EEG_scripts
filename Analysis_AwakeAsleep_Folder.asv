@@ -1,0 +1,313 @@
+clearvars, close all
+%% Input: 
+% 1) settings for FT: window size, overlap
+Settings.window=2; % s
+Settings.overlap_ratio=0.5; % ratio
+Settings.HP = 1;
+Settings.LP = 100;
+% 2) timeBin size
+timeBin=60; % s
+% 3) .edf file, or folder
+[FileName,PathName] = uigetfile('*.mat','Select the file to analyse','MultiSelect', 'on');
+if ischar(FileName) FileName={FileName}; end %if-statement for the case that there is only one channel
+cd(PathName)
+
+%% Plot setttings
+% plot property 'Color'
+c=colormap(lines); % colors to most contrasting color map
+close all
+
+% plot property 'LineStyle'
+ls{1}='-';
+ls{2}='--';
+ls{3}=':';
+ls{4}='-.';
+
+% Import select logicals
+load('DataTable_Logical') % File created by Select_Truncation.m
+
+DataTable=[];
+for experiment_index=1:length(FileName)
+Mouse=FileName{experiment_index}(1:end-4);
+
+find(strcmp(Mouse,DataTable_Logical.Experiment_Name))
+
+%% Import
+% import data from .mat file
+load(FileName{experiment_index},'Acceleration','Electrical')
+
+%% Calculations
+% create time vectors
+Electrical.t=0:1/Electrical.fs:(length(Electrical.CH1234)-1)/Electrical.fs; % \muV
+Acceleration.t=0:1/Acceleration.fs:(length(Acceleration.XYZ)-1)/Acceleration.fs; % s
+   
+% calculate absolute change of acceleration per sampling time
+Acceleration.v=(abs(diff(Acceleration.XYZ(1,:)))+...
+            abs(diff(Acceleration.XYZ(2,:)))+... 
+            abs(diff(Acceleration.XYZ(3,:))))*Acceleration.fs; % m/s^3[*(1/g) normalized?
+    tic    
+Acceleration.XYZ_filtered=[HighPassFilter(2,Settings.HP,Acceleration.fs,Acceleration.XYZ(1,:));...
+                       HighPassFilter(2,Settings.HP,Acceleration.fs,Acceleration.XYZ(2,:));...
+                       HighPassFilter(2,Settings.HP,Acceleration.fs,Acceleration.XYZ(3,:))];
+                   figure('Name','Shows XYZ of filtered Acceleration (High-pass 1Hz)')
+                   plot(Acceleration.t,Acceleration.XYZ_filtered')
+toc
+% truncate data 30 min each side
+% truncate acceleration data
+Acceleration.v=Acceleration.v(select_logical_acc);
+Acceleration.XYZ=Acceleration.XYZ(:,logical_trunc_acc);
+Acceleration.t=Acceleration.t(logical_trunc_acc);
+% truncate electrical data
+Electrical.CH1234=Electrical.CH1234(:,logical_trunc_ele);
+Electrical.t=Electrical.t(logical_trunc_ele);
+
+% additional small truncation with modulus so that we have 20-60 s time bins
+% truncate acceleration data
+nPoints=timeBin*Acceleration.fs;
+modulus=mod(length(Acceleration.t),nPoints);
+Acceleration.v=Acceleration.v(1:end-modulus);
+Acceleration.XYZ=Acceleration.XYZ(:,1:end-modulus);
+Acceleration.t=Acceleration.t(1:end-modulus);
+% truncate electrical data
+nPoints=timeBin*Electrical.fs;
+modulus=mod(length(Electrical.t),nPoints);
+Electrical.CH1234=Electrical.CH1234(:,1:end-modulus);
+Electrical.t=Electrical.t(1:end-modulus);
+   
+% reshape v into even parts (1 min bins)
+nPoints=timeBin*Acceleration.fs;
+nCol=length(Acceleration.v)/(nPoints);
+Acceleration.v_calc=reshape(Acceleration.v,[nPoints,nCol]);
+
+% mean reshaped v
+Acceleration.v_mean=mean(Acceleration.v_calc,1);
+   
+% fit mixture of gaussians with fitgmdist
+gmd=fitgmdist(Acceleration.v_mean',2);
+
+% Indexing: index(1) is the index integer for the distribution with the higher mean
+% which should be awake, alseep is then index(2) with the lower mean
+[~,index]=sort(gmd.mu,'descend');
+
+% Individual and combined probability density functions (pdf) normalized from 0 to inf
+awake_norm=1/(sqrt(pi*gmd.Sigma(index(1))/2)*(1+erf(gmd.mu(index(1))/sqrt(2*gmd.Sigma(index(1))))));
+pdf_Awake=@(v)awake_norm*exp(-((v-gmd.mu(index(1))).^2)/(2*gmd.Sigma(index(1))));
+
+sleep_norm=1/(sqrt(pi*gmd.Sigma(index(2))/2)*(1+erf(gmd.mu(index(2))/sqrt(2*gmd.Sigma(index(2))))));
+pdf_Sleep=@(v)sleep_norm*exp(-((v-gmd.mu(index(2))).^2)/(2*gmd.Sigma(index(2))));
+
+PDF=@(v)gmd.ComponentProportion(index(1))*pdf_Awake(v)+gmd.ComponentProportion(index(2))*pdf_Sleep(v);
+
+%% Plot histogram with pdf
+v=-1000:0.01:1000;
+
+figure('Name',[Mouse,' Histogram with pd'])
+histogram(Acceleration.v_mean,200,'Normalization','pdf'), hold on
+plot(v,PDF(v),'LineWidth',2.5)
+xlim([0,100])
+xlabel('Mean absolute change in acceleration over time'),ylabel('Probability')
+
+%% Use pdf to divide signal into awake and sleep
+% calculate threshold
+v_awake_threshold=sqrt(2*gmd.Sigma(index(1)))*(erfinv(1-sqrt(2/(gmd.Sigma(index(1))*pi))*.95/awake_norm))+gmd.mu(index(1));
+v_sleep_threshold=sqrt(2*gmd.Sigma(index(2)))*(erfinv((sqrt(2)*.95)/(sleep_norm*sqrt(pi*gmd.Sigma(index(2))))-erf(gmd.mu(index(2))/sqrt(2*gmd.Sigma(index(2))))))+gmd.mu(index(2));
+
+% create state array: zero for indeterminate, 
+% index(1) if awake, index(2) if sleep
+nPoints=[nPoints,nPoints*(Electrical.fs/Acceleration.fs)];
+state012=cell(2,1);
+for j=1:length(nPoints)
+    
+state012{j}=zeros(nPoints(j),nCol);
+state012_select_awake{j}=state012{j}(:,Acceleration.v_mean>v_sleep_threshold&Acceleration.v_mean>v_awake_threshold);
+state012{j}(:,Acceleration.v_mean>v_sleep_threshold&Acceleration.v_mean>v_awake_threshold)=ones(nPoints(j),size(state012_select_awake{j},2))*index(1);
+
+state012_select_sleep{j}=state012{j}(:,Acceleration.v_mean<v_sleep_threshold&Acceleration.v_mean<v_awake_threshold);
+state012{j}(:,Acceleration.v_mean<v_sleep_threshold&Acceleration.v_mean<v_awake_threshold)=ones(nPoints(j),size(state012_select_sleep{j},2))*index(2);
+
+state012{j}=reshape(state012{j},[1,numel(state012{j})]);
+
+% logical sleep and logical awake diff()+diff()(~=0) for points
+logical120{j}=[state012{j}==index(1);state012{j}==index(2);state012{j}==0]; % row 1 for awake etc.
+
+logical120_adjusted=logical120;
+logical120_adjusted{j}(:,[1,end])=false;
+
+logical_diff{j}=[diff(logical120_adjusted{j}(1,:));...
+                 diff(logical120_adjusted{j}(2,:));...
+                 diff(logical120_adjusted{j}(3,:))];
+logical_diff_true{j}=logical_diff{j}~=0;
+% points{1}{1} --> {acceleration}{awake} 
+points{j}={find(logical_diff_true{j}(1,:))+logical_diff{j}(logical_diff_true{j}(1,:));...
+           find(logical_diff_true{j}(2,:))+logical_diff{j}(logical_diff_true{j}(2,:));...
+           find(logical_diff_true{j}(3,:))+logical_diff{j}(logical_diff_true{j}(3,:))};
+       
+end
+
+%% Filter Electrical signals        
+for j=1:size(Electrical.CH1234,1)
+Electrical.CH1234(j,:) = HighPassfilter(2, Settings.HP, Electrical.fs, Electrical.CH1234(j,:));
+Electrical.CH1234(j,:) = LowPassfilter(2, Settings.LP, Electrical.fs, Electrical.CH1234(j,:));
+end
+
+%% Calculate and plot FFT's
+% FFT pre-processing
+paramsspect.window = Electrical.fs * Settings.window;
+paramsspect.noverlap = paramsspect.window * Settings.overlap_ratio;
+paramsspect.nfft = paramsspect.window;
+
+% calculate psd with spectrogram with points
+figure('Name',[Mouse,' Normalized Spectrogram'])
+for j=1:2 %%%%%%%%%%%%%% state
+for jj=1:size(Electrical.CH1234,1) % Channel
+    
+    PSD=[];
+    for jjj=1:2:size(points{2}{j},2)
+
+    [~,fff,~,ps]=spectrogram(Electrical.CH1234(jj,points{2}{j}(jjj):points{2}{j}(jjj+1)),...
+        paramsspect.window, paramsspect.noverlap, paramsspect.nfft, Electrical.fs);
+    PSD=[PSD,ps];
+
+    end
+    
+PSD_RowState_ColChannel{j,jj}=mean(PSD,2); % rows for awake/sleep, columns for channels
+
+% plot normalized (0-maxFreq Hz) spectrogram
+subplot(size(Electrical.CH1234,1),2,j+(jj-1)*2)
+ttt=1:Settings.window*Settings.overlap_ratio:size(PSD,2); %%%%%%%%%%%%%%%%
+maxFreq=20;
+PSD_norm=(PSD(fff<=maxFreq,:)./sum(PSD(fff<=maxFreq,:)))*100; %normalized power spectrum with frequencies of interest (%)
+imagesc(ttt,fff(fff<=maxFreq),PSD_norm)
+set(gca,'YDir','normal')
+colormap('PARULA')
+caxis([0,mean(max(PSD_norm))])
+colorbar              
+xlabel('Time (s)'),ylabel('LFPs PSD (%)')
+
+if j==1
+    state='Awake';
+else
+    state='Sleep';
+end
+title([state,' CH',num2str(jj)])
+
+end
+end
+
+%% PSD plot
+figure('Name',[Mouse,' PSD'])
+for j=1:size(PSD_RowState_ColChannel,1) % state
+for jj=1:size(PSD_RowState_ColChannel,2) % channel
+    subplot(size(PSD_RowState_ColChannel,2),size(PSD_RowState_ColChannel,1),j+(jj-1)*2)
+    plot(fff,PSD_RowState_ColChannel{j,jj})
+    xlim([0,50])
+    
+    if j==1
+        state='Awake';
+    else
+        state='Sleep';
+    end
+    title([state,' CH',num2str(jj)])
+    
+end
+end
+xlabel('Frequency (Hz)'), ylabel('Power \muV^2')
+
+%% Calculate and plot FFT's of acceleration to determine proper higpass cutoff frequency
+% FFT pre-processing
+paramsspect.window = Acceleration.fs * Settings.window;
+paramsspect.noverlap = paramsspect.window * Settings.overlap_ratio;
+paramsspect.nfft = paramsspect.window;
+
+% calculate psd with spectrogram with points
+figure('Name',[Mouse,' Normalized Spectrogram'])
+for j=1:2 % state
+for jj=1:size(Acceleration,1) % Channel
+    
+    PSD=[];
+    for jjj=1:2:size(points{1}{j},2)
+
+    [~,fff,~,ps]=spectrogram(Acceleration.XYZ(jj,points{2}{j}(jjj):points{2}{j}(jjj+1)),...
+        paramsspect.window, paramsspect.noverlap, paramsspect.nfft, Acceleration.fs);
+    PSD=[PSD,ps];
+
+    end
+    
+PSD_RowState_ColChannel_acceleration{j,jj}=mean(PSD,2); % rows for awake/sleep, columns for channels
+
+% plot normalized (0-maxFreq Hz) spectrogram
+subplot(size(Acceleration.XYZ,1),2,j+(jj-1)*2)
+ttt=1:Settings.window*Settings.overlap_ratio:size(PSD,2); %%%%%%%%%%%%%%%%
+maxFreq=50;
+PSD_norm=(PSD(fff<=maxFreq,:)./sum(PSD(fff<=maxFreq,:)))*100; %normalized power spectrum with frequencies of interest (%)
+imagesc(ttt,fff(fff<=maxFreq),PSD_norm)
+set(gca,'YDir','normal')
+colormap('PARULA')
+caxis([0,mean(max(PSD_norm))])
+colorbar              
+xlabel('Time (s)'),ylabel('Acceleration PSD (%)')
+
+if j==1
+    state='Awake';
+else
+    state='Sleep';
+end
+title([state,' CH',num2str(jj)])
+
+end
+end
+
+%% Change acceleration state plot
+figure('Name',[Mouse,' Change of acceleration state plot'])
+for j=1:size(points{1},1)
+    for jj=1:2:size(points{1}{j},2)
+        
+    plot(Acceleration.t(points{1}{j}(jj):points{1}{j}(jj+1)),...
+         Acceleration.v(points{1}{j}(jj):points{1}{j}(jj+1)),...
+         'Color',c(j,:)), hold on
+
+    end
+end
+xlabel('Time (s)'), ylabel('Absolute change of acceleration ^{1}/_{g*s}')
+
+%% Convert variables to DataTable 
+Mouse_Split=strsplit(Mouse,'_');
+Name=Mouse_Split(1);
+Genotype=Mouse_Split(2); 
+Day=Mouse_Split(3);
+State={'Awake','Sleep'};
+Channel={'CH1','CH2','CH3','CH4'};
+
+Name_Cell=cell(numel(PSD_RowState_ColChannel),1);
+Genotype_Cell=Name_Cell;
+Day_Cell=Name_Cell;
+Channel_Cell=Name_Cell;
+State_Cell=Name_Cell;
+PSD_Cell=Name_Cell;
+
+Name_Cell(1:end)=Name;
+Genotype_Cell(1:end)=Genotype;
+Day_Cell(1:end)=Day;
+
+count=0;
+for d=1:size(PSD_RowState_ColChannel,1)
+    for dd=1:size(PSD_RowState_ColChannel,2)
+    
+    count=count+1;    
+        
+    Channel_Cell{count}=State(d);
+    State_Cell{count}=Channel(dd);
+    PSD_Cell{count}=PSD_RowState_ColChannel{d,dd};
+
+    end
+end
+
+TableNames={'Name','Genotype','Day','Channel','State','Power'};
+DataTable_pre=table(Name_Cell,Genotype_Cell,Day_Cell,Channel_Cell,State_Cell,PSD_Cell,...
+                'VariableNames',TableNames);
+DataTable=[DataTable;DataTable_pre];
+clearvars -except Settings timeBin FileName PathName c ls DataTable
+
+end
+
+save('DataTable','DataTable')

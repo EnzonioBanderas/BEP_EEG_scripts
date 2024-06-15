@@ -1,0 +1,177 @@
+%% Get folder
+EF = uigetdir('','Select Experiment Folder (EF)');
+cd(EF)
+E=dir('*_Analyzed.mat');
+nE=length(E);
+
+% Load start time table
+load('DataTable_StartTime')
+
+% Define between which hours it is light
+LightDark=[7,19];
+States={'Awake_Light';'NREM_Light';'REM_Light';...
+        'Awake_Dark';'NREM_Dark';'REM_Dark'};
+nState=length(States);
+
+% preallocation
+DataTable2_cell=cell(nE,1);
+DataTable3_cell=cell(nE,1);
+DataTable4_cell=cell(nE,1);
+DataTable_Percentages_cell=cell(nE,1);
+Name_Percentages_cell=cell(nE,1);
+Genotype_Percentages_cell=cell(nE,1);
+Day_Percentages_cell=cell(nE,1);
+Light_Percentages_cell=cell(nE,1);
+Dark_Percentages_cell=cell(nE,1);
+
+%% Light/Dark assume to be from 7 AM to 7 PM, compute percentages and state length distributions
+for i=1:nE
+    
+    % Load and create Light and Dark logicals
+    load(E(i).name,'Electrical','FFT','Settings')
+    starttimesplit=strsplit(DataTable_StartTime.StartTime{strcmp(DataTable_StartTime.Name,E(i).name)},'.');
+    StartTime=str2double(starttimesplit{1})*60*60+str2double(starttimesplit{2})*60+str2double(starttimesplit{3});
+    t=mod(Electrical.t+StartTime,24*60*60);
+    Light_logical=t>LightDark(1)*60*60&t<LightDark(2)*60*60;
+    Dark_logical=~Light_logical;
+    
+    % Temptable strings
+    Esplit=strsplit(E(i).name,'_');
+    E_Name=Esplit{1};
+    E_Genotype=Esplit{2};
+    E_Day=Esplit{3};
+
+    % Distributions
+    % Light
+    Electrical_points.Awake_Light=logical2points((points2logical(Electrical.points_AA,Electrical.n)|points2logical(Electrical.points_QA,Electrical.n))&Light_logical);
+    Awake_Light=(Electrical_points.Awake_Light(:,2)-Electrical_points.Awake_Light(:,1)+1)/Electrical.fs;
+    Electrical_points.NREM_Light=logical2points(points2logical(Electrical.points_NREM,Electrical.n)&Light_logical);
+    NREM_Light=(Electrical_points.NREM_Light(:,2)-Electrical_points.NREM_Light(:,1)+1)/Electrical.fs;
+    Electrical_points.REM_Light=logical2points(points2logical(Electrical.points_REM,Electrical.n)&Light_logical);
+    REM_Light=(Electrical_points.REM_Light(:,2)-Electrical_points.REM_Light(:,1)+1)/Electrical.fs;
+    % Dark
+    Electrical_points.Awake_Dark=logical2points((points2logical(Electrical.points_AA,Electrical.n)|points2logical(Electrical.points_QA,Electrical.n))&Dark_logical);
+    Awake_Dark=(Electrical_points.Awake_Dark(:,2)-Electrical_points.Awake_Dark(:,1)+1)/Electrical.fs;
+    Electrical_points.NREM_Dark=logical2points(points2logical(Electrical.points_NREM,Electrical.n)&Dark_logical);
+    NREM_Dark=(Electrical_points.NREM_Dark(:,2)-Electrical_points.NREM_Dark(:,1)+1)/Electrical.fs;
+    Electrical_points.REM_Dark=logical2points(points2logical(Electrical.points_REM,Electrical.n)&Dark_logical);
+    REM_Dark=(Electrical_points.REM_Dark(:,2)-Electrical_points.REM_Dark(:,1)+1)/Electrical.fs;
+    % Percentages Light and Dark
+    Light_Percentages=[sum(Awake_Light),sum(NREM_Light),sum(REM_Light)];
+    Light_Percentages=Light_Percentages/sum(Light_Percentages);
+    Dark_Percentages=[sum(Awake_Dark),sum(NREM_Dark),sum(REM_Dark)];
+    Dark_Percentages=Dark_Percentages/sum(Dark_Percentages);
+    
+    % DataTable2 with PSDs and length distributions
+    temp_points={Electrical_points.Awake_Light;Electrical_points.NREM_Light;Electrical_points.REM_Light;...
+                 Electrical_points.Awake_Dark;Electrical_points.NREM_Dark;Electrical_points.REM_Dark;};
+    for ii=1:nState
+        temp_points{ii}=temp_points{ii}(temp_points{ii}(:,2)-temp_points{ii}(:,1)+1>=FFT.nWindowLength,:);
+    end
+    temp_lengthdis={Awake_Light;NREM_Light;REM_Light;...
+                    Awake_Dark;NREM_Dark;REM_Dark};
+                
+    % preallocation
+    PSD_cell=cell(nState*Settings.nChannel,1);
+    Name_cell=cell(nState*Settings.nChannel,1);
+    Genotype_cell=cell(nState*Settings.nChannel,1);
+    Day_cell=cell(nState*Settings.nChannel,1);
+    State_cell=cell(nState*Settings.nChannel,1);
+    Channel_cell=cell(nState*Settings.nChannel,1);
+    
+    Name_cell2=cell(nState,1);
+    Genotype_cell2=cell(nState,1);
+    Day_cell2=cell(nState,1);
+    State_cell2=cell(nState,1);
+    LengthDistribution_cell2=cell(nState,1);
+                
+    count1=0;
+    count2=0;
+    for ii=1:nState
+        count2=count2+1;
+        for iii=1:Settings.nChannel
+            count1=count1+1;
+            PSD_matrix=spectrogram_dis(Electrical.CH1234(:,iii),temp_points{ii},...
+            FFT.nWindowLength,FFT.nOverlap,FFT.n,Electrical.fs);
+            Name_cell{count1}=E_Name;
+            Genotype_cell{count1}=E_Genotype;
+            Day_cell{count1}=E_Day;
+            State_cell{count1}=States{ii};
+            Channel_cell{count1}=Settings.Channels{iii};
+            PSD_cell{count1}=mean(PSD_matrix,2);
+        end
+        Name_cell2{count2}=E_Name;
+        Genotype_cell2{count2}=E_Genotype;
+        Day_cell2{count2}=E_Day;
+        State_cell2{count2}=States{ii};
+        LengthDistribution_cell2{count2}=temp_lengthdis{ii};
+    end
+    Name_Percentages_cell{i}=E_Name;
+    Genotype_Percentages_cell{i}=E_Genotype;
+    Day_Percentages_cell{i}=E_Day;
+    Light_Percentages_cell{i}=Light_Percentages;
+    Light_Percentages_cell{i}=Dark_Percentages;
+    
+    DataTable2_cell{i}=table(Name_cell,Genotype_cell,Day_cell,State_cell,Channel_cell,PSD_cell,...
+                    'VariableNames',{'Name','Genotype','Day','State','Channel','PSD'});
+    DataTable3_cell{i}=table(Name_cell2,Genotype_cell2,Day_cell2,State_cell2,LengthDistribution_cell2,...
+                    'VariableNames',{'Name','Genotype','Day','State','LengthDistribution'});
+    
+end
+
+DataTable2=cat(1,DataTable2_cell{:});
+DataTable3=cat(1,DataTable3_cell{:});
+DataTable_Percentages=cat(1,DataTable_Percentages_cell{:});
+
+%%
+clearvars -except nE E LightDark DataTable_StartTime Electrical Settings FFT
+States={'Light';'Dark'};
+nState=length(States);
+for i=1:nE    
+    
+    % Temptable strings
+    Esplit=strsplit(E(i).name,'_');
+    E_Name=Esplit{1};
+    E_Genotype=Esplit{2};
+    E_Day=Esplit{3};
+    % Load and create Light and Dark logicals
+    starttimesplit=strsplit(DataTable_StartTime.StartTime{strcmp(DataTable_StartTime.Name,E(i).name)},'.');
+    StartTime=str2double(starttimesplit{1})*60*60+str2double(starttimesplit{2})*60+str2double(starttimesplit{3});
+    Electrical.t=mod(Electrical.t+StartTime,24*60*60);
+    Light_logical=Electrical.t>LightDark(1)*60*60&Electrical.t<LightDark(2)*60*60;
+    Dark_logical=~Light_logical;
+    Light_logical=Light_logical&points2logical(Electrical.points,Electrical.n);
+    Dark_logical=Dark_logical&points2logical(Electrical.points,Electrical.n);
+    points_Light=logical2points(Light_logical);
+    points_Dark=logical2points(Dark_logical);
+    
+    % preallocation
+    PSD_cell=cell(nState*Settings.nChannel,1);
+    Name_cell=cell(nState*Settings.nChannel,1);
+    Genotype_cell=cell(nState*Settings.nChannel,1);
+    Day_cell=cell(nState*Settings.nChannel,1);
+    State_cell=cell(nState*Settings.nChannel,1);
+    Channel_cell=cell(nState*Settings.nChannel,1);
+    
+    temp_points={points_Light;points_Dark};
+    count1=0;
+    for ii=1:nState
+        for iii=1:Settings.nChannel
+            count1=count1+1;
+            PSD_matrix=spectrogram_dis(Electrical.CH1234(:,iii),temp_points{ii},...
+            FFT.nWindowLength,FFT.nOverlap,FFT.n,Electrical.fs);
+            Name_cell{count1}=E_Name;
+            Genotype_cell{count1}=E_Genotype;
+            Day_cell{count1}=E_Day;
+            State_cell{count1}=States{ii};
+            Channel_cell{count1}=Settings.Channels{iii};
+            PSD_cell{count1}=mean(PSD_matrix,2);
+        end
+    end
+    DataTable4_cell{i}=table(Name_cell,Genotype_cell,Day_cell,State_cell,Channel_cell,PSD_cell,...
+                    'VariableNames',{'Name','Genotype','Day','State','Channel','PSD'});
+    
+end
+
+DataTable4=cat(1,DataTable4_cell{:});
+save('DataTable','DataTable2','DataTable3','DataTable4','-append')
